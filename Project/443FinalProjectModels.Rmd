@@ -1,0 +1,225 @@
+---
+title: "Stat 443 Final Project"
+author: "Alex Funches"
+date: "3/2/2020"
+output:
+  word_document: default
+  pdf_document: default
+  html_document: default
+---
+```{r Data and Linear/Lasso Model echo=TRUE , eval=TRUE, warning = FALSE, message = FALSE}
+# Read in data and do the preprocessing 
+library(zoo)
+library(tidyverse)
+library(lubridate)
+library(fastDummies)
+library(glmnet)
+data = read.csv('T:/Program Files/School/Senior/S2/Stat 443/Consulting Project/PRSA_Data_Wanshouxigong_20130301-20170228.csv',header = TRUE)
+data = na.locf(data, fromLast = TRUE)
+data$datetime = with(data, ymd_h(paste(year, month, day, hour, sep= ' ')))
+
+#Linear Model for Original Dataset + Testing VIFS 
+linear_model = lm(PM2.5~ PM10+SO2+NO2+CO+O3+TEMP+PRES+DEWP+month,data = data)
+linear_mse = mean((linear_model$fitted.values-df$PM2.5)^2)
+print(linear_mse)
+library(car)
+vif(linear_model)
+summary(data)
+
+# Create daily average dataset and dummy variables of month and weekday
+data[,c('station', 'wd', 'year', 'month', 'day', 'hour','No')] = list(NULL)
+df = data %>%
+  mutate(date = date(datetime)) %>%
+  group_by(date) %>%
+  summarize_each(funs(mean), PM2.5:WSPM)
+df$weekday = as.factor(wday(df$date))
+df$month = as.factor(month(df$date))
+df = fastDummies::dummy_cols(df, select_columns = c("month","weekday"))
+df$yesterday = lag(df$PM2.5, default = 0)
+summary(df)
+
+# Linear Regression 
+lm_model = lm(PM2.5~ yesterday+PM10+SO2+NO2+CO+O3+TEMP+PRES+DEWP+month,data = df)#DEWP becomes collinear because of the month dummy variables + TEMP becomes collinear because of yesterday's PM2.5
+lm_mse = mean((lm_model$fitted.values-df$PM2.5)^2)
+print(lm_mse)
+summary(lm_model) #No and several month variables are not significant 
+
+#Second Linear Regression with NO2 removed 
+lm_model2 = lm(PM2.5~ yesterday+PM10+SO2+CO+O3+TEMP+PRES+DEWP+month,data = df)
+lm_mse2 = mean((lm_model2$fitted.values-df$PM2.5)^2)
+print(lm_mse2)
+summary(lm_model2)
+
+#Model Selection Tests
+library(MASS)
+stepwise_linearmodel = stepAIC(lm_model, dir="both")
+summary(stepwise_linearmodel) #Removes no varaibles, AIC is 8958.36
+rsquared_step= summary(stepwise_linearmodel)$r.squared
+cat("Rsquared for the stepwise linear model is:", rsquared_step, "\n")
+
+backward_linearmodel = stepAIC(lm_model, dir="backward")
+summary(backward_linearmodel) #No variables are removed, AIC is 8958.36
+rsquared_back= summary(backward_linearmodel)$r.squared
+cat("Rsquared for the backwards linear model is:", rsquared_back, "\n") 
+
+linearmodel_intercept = lm(PM2.5 ~ 1, data=df)
+forward_linearmodel = stepAIC(linearmodel_intercept, direction="forward", scope=formula(lm_model))
+summary(forward_linearmodel) #No variables are removed, AIC is 8958.36
+rsquared_forward= summary(forward_linearmodel)$r.squared
+cat("Rsquared for the forwards linear model is:", rsquared_forward, "\n")
+
+#VIF for Linear Model
+library(car)
+vif(lm_model) #Four VIFS over 10 with TEMP, DEWP, month7, and month8 
+
+#Normality Test for Linear Model
+par(mfrow=c(2,2))
+plot(lm_model)
+plot(lm_model, which=2) #Points deviate from line reject assumption of normality 
+
+#Constant Variance for Linear Model 
+library(faraway)
+require(lmtest)
+bptest(lm_model) #Reject assumption of constant variance at p of 2.2e-16
+
+#Testing for Outliers, Large Leverage Points, and Influential Points for Linear Model
+cooks.distance(lm_model)[cooks.distance(lm_model)>1]  #No influential points using 1 as a cutoff 
+
+student.res = rstandard(lm_model)
+student.res[abs(student.res)>2] #There are 60 outliers 
+
+p = ncol(df)
+n = nrow(df)
+leverage = hatvalues(lm_model)
+leverage[(leverage > 2*p/n)] #Over 1,400 large leverage points using 2*p/n as a cutoff  
+
+# Lasso Regression
+x = subset(df,select=-c(PM2.5, date,month, weekday))
+y = df$PM2.5
+x = as.matrix(x)
+lambdas <- 10^seq(3, -2, by = -.1)
+cv_fit = cv.glmnet(x, y, alpha = 1, lambda = lambdas, nfolds = 5)
+#plot(cv_fit)
+lambda_best <- cv_fit$lambda.min 
+lasso_model <- glmnet(x, y, alpha = 1, lambda = lambda_best, standardize = TRUE)
+lasso_mse = mean((predict(lasso_model,newx=x)-df$PM2.5)^2)
+print(lasso_mse)
+print(lm_mse)
+```
+
+```{r Data Polynomial Model without Interaction, echo=TRUE , eval=TRUE, warning = FALSE, message = FALSE}
+#Full Polynomial Model without Interaction (excluding categorical variables)
+poly_model = lm(PM2.5 ~ poly(yesterday, degree=2, raw=T) + poly(PM10, degree=2, raw=T) + poly(SO2, degree=2, raw=T) + poly(NO2, degree=2, raw=T) + poly(CO, degree=2, raw=T) + poly(O3, degree=2, raw=T) + poly(TEMP, degree=2, raw=T) + poly(PRES, degree=2, raw=T) + poly(DEWP, degree=2, raw=T) + month, data = df)
+summary(poly_model)
+
+#Moving Significant Variables to 3rd Degree/Insignificant 2nd Degree Variabes to 1st Degree
+poly_model2 = lm(PM2.5 ~ yesterday + poly(PM10, degree=3, raw=T) + SO2 + NO2 + poly(CO, degree=3, raw=T) +O3 + TEMP + PRES + poly(DEWP, degree=3, raw=T) + month, data = df)
+summary(poly_model2)
+
+#Changing Insignificant 3rd Degree Variables back to 2nd Degree
+poly_model3 = lm(PM2.5 ~ yesterday + poly(PM10, degree=2, raw=T) + SO2 + NO2 + poly(CO, degree=2, raw=T) +O3 + TEMP + PRES + poly(DEWP, degree=3, raw=T) + month, data = df)
+summary(poly_model3)
+
+#Model Selection Tests
+library(MASS)
+stepwise_polymodel = stepAIC(poly_model3, dir="both")
+summary(stepwise_polymodel) #No variables are removed, AIC is 8885.33
+rsquared_pstep= summary(stepwise_polymodel)$r.squared
+cat("Rsquared for the stepwise linear model is:", rsquared_pstep, "\n")
+
+backward_polymodel = stepAIC(poly_model3, dir="backward")
+summary(backward_polymodel) #No variables are removed, AIC is 8885.33
+rsquared_pback= summary(backward_polymodel)$r.squared
+cat("Rsquared for the backwards linear model is:", rsquared_pback, "\n") 
+
+poly_intercept = lm(PM2.5 ~ 1, data=df)
+forward_polymodel = stepAIC(poly_intercept, direction="forward", scope=formula(poly_model3))
+summary(forward_polymodel) #No variables are removed, AIC is 8885.33
+rsquared_yforward= summary(forward_polymodel)$r.squared
+cat("Rsquared for the forwards linear model is:", rsquared_yforward, "\n")
+
+#Normality Test
+par(mfrow=c(2,2))
+plot(poly_model3)
+plot(poly_model3, which=2) #Points deviate from line reject assumption of normality 
+
+#Constant Variance 
+library(faraway)
+require(lmtest)
+bptest(poly_model3) #Reject assumption of constant variance at p of 2.2e-16
+
+#Testing for Outliers, Large Leverage Points, and Influential Points 
+cooks.distance(poly_model3)[cooks.distance(poly_model3)>1] #No influential points using 1 as a cutoff 
+
+student.polyres = rstandard(poly_model3)
+student.polyres[abs(student.polyres)>2] #57 Outliers using 2 as a cutoff 
+
+p = ncol(df)
+n = nrow(df)
+leverage = hatvalues(poly_model3)
+leverage[(leverage > 2*p/n)] #32 leverage points using 2*p/n as a cutoff  
+```
+
+```{r Polynomial Model With Interaction, echo=TRUE , eval=TRUE, warning = FALSE, message = FALSE}
+#Full Interaction Polynomial Model with Interaction (excluding non-numeric variables)
+intpoly_model = lm(PM2.5 ~ yesterday*PM10 + yesterday*SO2 + yesterday*SO2 + yesterday*NO2 + yesterday*CO + yesterday*O3 + yesterday*TEMP + yesterday*PRES + yesterday*DEWP + PM10*SO2 + PM10*NO2 + PM10*CO + PM10*O3 + PM10*TEMP + PM10*PRES + PM10*DEWP + SO2*NO2 + SO2*CO + SO2*O3 + SO2*TEMP + SO2*PRES + SO2*DEWP + NO2*CO + NO2*O3 + NO2*TEMP + NO2*PRES + NO2*DEWP + CO*O3 + CO*TEMP + CO*PRES + CO*DEWP + O3*TEMP + O3*PRES + O3*DEWP + TEMP*PRES + TEMP*DEWP + PRES*DEWP + month, data=df)  
+summary(intpoly_model)
+
+#Changing Significant Interaction Terms to 2nd Degree/Deleting Insignificant Terms
+intpoly_model2 = lm(PM2.5 ~ poly(yesterday*PM10, degree=2, raw=T) + poly(yesterday*NO2, degree=2, raw=T) + poly(yesterday*CO, degree=2, raw=T) + poly(PM10*SO2, degree=2, raw=T) + poly(PM10*NO2, degree=2, raw=T) + poly(PM10*TEMP, degree=2, raw=T) + poly(PM10*DEWP, degree=2, raw=T) + poly(SO2*NO2, degree=2, raw=T) + poly(SO2*CO, degree=2, raw=T) + poly(SO2*PRES, degree=2, raw=T) + poly(SO2*DEWP, degree=2, raw=T) + poly(NO2*DEWP, degree=2, raw=T) + poly(CO*O3, degree=2, raw=T) + poly(CO*DEWP, degree=2, raw=T) + poly(O3*PRES, degree=2, raw=T) + poly(TEMP*PRES, degree=2, raw=T) + month, data=df)   
+summary(intpoly_model2)
+
+#Moving Significant Second Degree Interaction Terms to 3rd Degree, Moving Insignificant Second Degrees back to 1st Degree 
+intpoly_model3 = lm(PM2.5 ~ poly(yesterday*PM10, degree=3, raw=T) + poly(yesterday*NO2, degree=1, raw=T) + poly(yesterday*CO, degree=3, raw=T) + poly(PM10*SO2, degree=3, raw=T) + poly(PM10*NO2, degree=3, raw=T) + poly(PM10*TEMP, degree=3, raw=T) + poly(PM10*DEWP, degree=3, raw=T) + poly(SO2*NO2, degree=3, raw=T) + poly(SO2*CO, degree=3, raw=T) + poly(SO2*PRES, degree=1, raw=T) + poly(SO2*DEWP, degree=1, raw=T) + poly(NO2*DEWP, degree=3, raw=T) + poly(CO*O3, degree=3, raw=T) + poly(CO*DEWP, degree=1, raw=T) + poly(O3*PRES, degree=3, raw=T) + poly(TEMP*PRES, degree=1, raw=T) + month, data=df)   
+summary(intpoly_model3)
+
+#Moving Insignificant 3rd Degrees back to 2nd Degree
+intpoly_model4 = lm(PM2.5 ~ poly(yesterday*PM10, degree=3, raw=T) + poly(yesterday*NO2, degree=1, raw=T) + poly(yesterday*CO, degree=2, raw=T) + poly(PM10*SO2, degree=2, raw=T) + poly(PM10*NO2, degree=3, raw=T) + poly(PM10*TEMP, degree=3, raw=T) + poly(PM10*DEWP, degree=3, raw=T) + poly(SO2*NO2, degree=2, raw=T) + poly(SO2*CO, degree=3, raw=T) + poly(SO2*DEWP, degree=1, raw=T) + poly(NO2*DEWP, degree=2, raw=T) + poly(CO*O3, degree=2, raw=T) + poly(CO*DEWP, degree=1, raw=T) + poly(O3*PRES, degree=3, raw=T) + poly(TEMP*PRES, degree=1, raw=T) + month, data=df)   
+summary(intpoly_model4)
+intpoly_mse = mean((intpoly_model4$fitted.values-df$PM2.5)^2)
+
+#Model Selection Tests for Interaction Polynomial Model
+library(MASS)
+stepwise_intpolymodel = stepAIC(intpoly_model4, dir="both")
+summary(stepwise_intpolymodel) #No variables are removed, AIC is 8343.46
+rsquared_ipstep= summary(stepwise_intpolymodel)$r.squared
+cat("Rsquared for the stepwise linear model is:", rsquared_ipstep, "\n")
+
+backward_intpolymodel = stepAIC(intpoly_model4, dir="backward")
+summary(backward_intpolymodel) #No variables are removed, AIC is 8343.46
+rsquared_ipback= summary(backward_intpolymodel)$r.squared
+cat("Rsquared for the backwards linear model is:", rsquared_ipback, "\n") 
+
+intpoly_intercept = lm(PM2.5 ~ 1, data=df)
+forward_intpolymodel = stepAIC(intpoly_intercept, direction="forward", scope=formula(intpoly_model4))
+summary(forward_intpolymodel) #No variables are removed, AIC is 8343.46
+rsquared_ipforward= summary(forward_intpolymodel)$r.squared
+cat("Rsquared for the forwards linear model is:", rsquared_ipforward, "\n")
+
+#Normality Test
+par(mfrow=c(2,2))
+plot(intpoly_model4)
+plot(intpoly_model4, which=2) #Points deviate from line reject assumption of normality 
+
+#Constant Variance 
+library(faraway)
+require(lmtest)
+bptest(intpoly_model4) #Reject assumption of constant variance at p of 2.573e-16
+
+#Testing for Outliers, Large Leverage Points, and Influential Points 
+cooks.distance(intpoly_model4)[cooks.distance(intpoly_model4)>1] #No influential points using 1 as a cutoff 
+
+student.intpolyres = rstandard(intpoly_model4)
+student.intpolyres[abs(student.intpolyres)>2] #72 Outliers using 2 as a cutoff 
+
+p = ncol(df)
+n = nrow(df)
+leverage = hatvalues(intpoly_model4)
+leverage[(leverage > 2*p/n)] #1,431 leverage points using 2*p/n as a cutoff  
+poly_mse = mean((predict(poly_model3,newx=x)-df$PM2.5)^2)
+print(poly_mse)
+intpoly_mse = mean((predict(intpoly_model4,newx=x)-df$PM2.5)^2)
+print(intpoly_mse)
+```
+
+
